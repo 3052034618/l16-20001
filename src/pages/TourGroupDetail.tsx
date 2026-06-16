@@ -19,6 +19,7 @@ import {
   Statistic,
   Row,
   Col,
+  Tooltip,
 } from 'antd'
 import {
   ArrowLeftOutlined,
@@ -28,7 +29,8 @@ import {
   SwapOutlined,
   FileTextOutlined,
   DollarOutlined,
-  CheckCircleOutlined,
+  UnlockOutlined,
+  LockOutlined,
 } from '@ant-design/icons'
 import { TourGroup, Tourist, PageResult, SelfPaidItem, Refund, ItineraryData } from '../types'
 
@@ -54,6 +56,8 @@ const TourGroupDetail = () => {
   const [refundForm] = Form.useForm()
   const [itineraryData, setItineraryData] = useState<ItineraryData | null>(null)
   const [itineraryModalVisible, setItineraryModalVisible] = useState(false)
+  const [activeTab, setActiveTab] = useState<string>('tourists')
+  const [loadedTabs, setLoadedTabs] = useState<Set<string>>(new Set(['tourists']))
 
   useEffect(() => {
     if (id) {
@@ -61,6 +65,23 @@ const TourGroupDetail = () => {
       loadTourists()
     }
   }, [id])
+
+  useEffect(() => {
+    if (id && loadedTabs.size === 1 && activeTab === 'tourists') return
+    handleTabChange(activeTab)
+  }, [activeTab])
+
+  const handleTabChange = (key: string) => {
+    setActiveTab(key)
+    if (key === 'selfpaid' && !loadedTabs.has('selfpaid')) {
+      loadSelfPaidItems()
+      setLoadedTabs(prev => new Set(prev).add('selfpaid'))
+    }
+    if (key === 'refunds' && !loadedTabs.has('refunds')) {
+      loadRefunds()
+      setLoadedTabs(prev => new Set(prev).add('refunds'))
+    }
+  }
 
   const loadGroup = async () => {
     try {
@@ -133,6 +154,26 @@ const TourGroupDetail = () => {
     })
   }
 
+  const handleUnlockTourist = (record: Tourist) => {
+    Modal.confirm({
+      title: '解锁名额',
+      content: `确认解锁 ${record.name} 的名额？解锁后名额可正常保留并继续收款流程。`,
+      onOk: async () => {
+        try {
+          const res = await (window as any).electronAPI.tourists.unlock(record.id)
+          if (res && res.success) {
+            message.success(res.message || '解锁成功')
+          } else {
+            message.error(res?.message || '解锁失败')
+          }
+          loadTourists()
+        } catch (e: any) {
+          message.error(e.message || '解锁失败')
+        }
+      },
+    })
+  }
+
   const handleTouristSubmit = async () => {
     try {
       const values = await touristForm.validateFields()
@@ -151,8 +192,9 @@ const TourGroupDetail = () => {
 
       setTouristModalVisible(false)
       loadTourists()
-    } catch (e) {
+    } catch (e: any) {
       console.error(e)
+      message.error(e.message || '保存失败')
     }
   }
 
@@ -173,15 +215,38 @@ const TourGroupDetail = () => {
       onOk: async () => {
         try {
           const result = await (window as any).electronAPI.resource.allocate(Number(id))
-          if (result.success) {
+          if (result && result.success) {
             message.success(`分配成功！酒店: ${result.hotel.name}，航班: ${result.flight.flight_number}`)
             loadGroup()
             loadTourists()
           } else {
-            message.error(result.message || '分配失败')
+            Modal.error({
+              title: '分配失败',
+              content: (
+                <div>
+                  <p style={{ color: '#f5222d', fontWeight: 600 }}>{result?.message || '分配失败'}</p>
+                  {result?.diagnosis && (
+                    <>
+                      <Divider style={{ margin: '8px 0' }}>当前库存情况</Divider>
+                      <div style={{ fontSize: 12, color: '#666' }}>
+                        {result.diagnosis.neededRoomsInfo && <div>需要：{result.diagnosis.neededRoomsInfo}</div>}
+                        {result.diagnosis.candidates && result.diagnosis.candidates.length > 0 && (
+                          <div style={{ marginTop: 8 }}>
+                            <div style={{ fontWeight: 600, marginBottom: 4 }}>候选酒店可用情况：</div>
+                            {result.diagnosis.candidates.map((c: any, i: number) => (
+                              <div key={i}>【{c.star_rating}星】{c.name}：可用{c.available_rooms}/{c.total_rooms}间（{c.city}）</div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    </>
+                  )}
+                </div>
+              ),
+            })
           }
-        } catch (e) {
-          message.error('分配失败')
+        } catch (e: any) {
+          message.error(e.message || '分配失败')
         }
       },
     })
@@ -198,8 +263,9 @@ const TourGroupDetail = () => {
       setSelfPaidModalVisible(false)
       selfPaidForm.resetFields()
       loadSelfPaidItems()
-    } catch (e) {
+    } catch (e: any) {
       console.error(e)
+      message.error(e.message || '添加失败')
     }
   }
 
@@ -214,8 +280,9 @@ const TourGroupDetail = () => {
       setRefundModalVisible(false)
       refundForm.resetFields()
       loadRefunds()
-    } catch (e) {
+    } catch (e: any) {
       console.error(e)
+      message.error(e.message || '提交失败')
     }
   }
 
@@ -232,11 +299,49 @@ const TourGroupDetail = () => {
   const handleGenerateSettlement = async () => {
     Modal.confirm({
       title: '生成结算单',
-      content: '确认生成本团的财务结算单？',
+      content: '确认生成本团的财务结算单？系统会按数据库实际汇总的自费、退款金额进行精确结算。',
       onOk: async () => {
         try {
-          await (window as any).electronAPI.finance.createSettlement(Number(id))
-          message.success('结算单已生成')
+          const result = await (window as any).electronAPI.finance.createSettlement(Number(id))
+          if (result && result.success) {
+            const calcSelfPaid = selfPaidItems.reduce((s, i) => s + (i.amount || 0), 0)
+            const calcRefund = refunds.reduce((s, i) => s + (i.amount || 0), 0)
+            const sameSelfPaid = Math.abs(calcSelfPaid - (result.totalSelfPaid || 0)) < 0.001
+            const sameRefund = Math.abs(calcRefund - (result.totalRefund || 0)) < 0.001
+            Modal.info({
+              title: `结算单#${result.settlementId} 已生成`,
+              content: (
+                <div>
+                  <div style={{ marginBottom: 8, color: sameSelfPaid && sameRefund ? '#52c41a' : '#fa8c16' }}>
+                    {sameSelfPaid && sameRefund ? '汇总金额与列表明细完全一致 ✓' : '金额存在差异（以数据库聚合为准）'}
+                  </div>
+                  <Descriptions column={1} size="small" bordered>
+                    <Descriptions.Item label="团费总额 (团人数×基础价)">
+                      ¥{(result.totalFee || 0).toFixed(2)}
+                    </Descriptions.Item>
+                    <Descriptions.Item label="已收团费合计">
+                      ¥{(result.totalPaid || 0).toFixed(2)}
+                    </Descriptions.Item>
+                    <Descriptions.Item label={`自费项目汇总 （${selfPaidItems.length}项）`}>
+                      <div style={{ color: sameSelfPaid ? '#52c41a' : '#fa8c16' }}>
+                        列表¥{calcSelfPaid.toFixed(2)} / 结算¥{(result.totalSelfPaid || 0).toFixed(2)}
+                      </div>
+                    </Descriptions.Item>
+                    <Descriptions.Item label={`退款汇总（${refunds.length}项）`}>
+                      <div style={{ color: sameRefund ? '#52c41a' : '#fa8c16' }}>
+                        列表¥{calcRefund.toFixed(2)} / 结算¥{(result.totalRefund || 0).toFixed(2)}
+                      </div>
+                    </Descriptions.Item>
+                    <Descriptions.Item label="净额 (团费+自费-退款)" style={{ fontWeight: 600 }}>
+                      ¥{(result.netAmount || 0).toFixed(2)}
+                    </Descriptions.Item>
+                  </Descriptions>
+                </div>
+              ),
+            })
+          } else {
+            message.error(result?.message || '生成失败')
+          }
         } catch (e: any) {
           message.error(e.message || '生成失败')
         }
@@ -294,10 +399,22 @@ const TourGroupDetail = () => {
     paid: '已付款',
   }
 
+  const lockedCount = tourists.list.filter(t => t.is_locked).length
+
   const touristColumns = [
     { title: '序号', dataIndex: 'seat_number', key: 'seat_number', width: 60,
       render: (val: number) => val || '-' },
-    { title: '姓名', dataIndex: 'name', key: 'name', width: 100 },
+    { title: '姓名', dataIndex: 'name', key: 'name', width: 100,
+      render: (val: string, rec: Tourist) => (
+        <Space>
+          <span style={{ fontWeight: rec.is_locked ? 600 : 400 }}>{val}</span>
+          {rec.is_locked && (
+            <Tooltip title={`锁定原因：${rec.lock_reason || '超期未付款'}`}>
+              <Tag color="red" icon={<LockOutlined />}>名额已锁定</Tag>
+            </Tooltip>
+          )}
+        </Space>
+      )},
     { title: '性别', dataIndex: 'gender', key: 'gender', width: 60 },
     { title: '年龄', dataIndex: 'age', key: 'age', width: 60 },
     { title: '电话', dataIndex: 'phone', key: 'phone', width: 120 },
@@ -320,7 +437,7 @@ const TourGroupDetail = () => {
     {
       title: '操作',
       key: 'actions',
-      width: 200,
+      width: 260,
       render: (_: any, record: Tourist) => (
         <Space size="small">
           <Button type="link" size="small" icon={<EditOutlined />}
@@ -340,6 +457,19 @@ const TourGroupDetail = () => {
             <Option value="returned">已返回</Option>
             <Option value="cancelled">已取消</Option>
           </Select>
+          {record.is_locked && (
+            <Tooltip title={record.lock_reason || '点击解锁名额'}>
+              <Button
+                type="primary"
+                ghost
+                size="small"
+                icon={<UnlockOutlined />}
+                onClick={() => handleUnlockTourist(record)}
+              >
+                解锁
+              </Button>
+            </Tooltip>
+          )}
           <Button type="link" size="small" danger icon={<DeleteOutlined />}
             onClick={() => handleDeleteTourist(record.id)}>
             删除
@@ -374,6 +504,8 @@ const TourGroupDetail = () => {
 
   const totalFee = tourists.total * (group?.base_price || 0)
   const totalPaid = tourists.list.reduce((sum, t) => sum + (t.amount_paid || 0), 0)
+  const totalSelfPaid = selfPaidItems.reduce((s, i) => s + (i.amount || 0), 0)
+  const totalRefund = refunds.reduce((s, i) => s + (i.amount || 0), 0)
 
   return (
     <div>
@@ -383,6 +515,9 @@ const TourGroupDetail = () => {
         </Button>
         <span style={{ fontSize: 20, fontWeight: 600 }}>{group.group_name}</span>
         <Tag color={statusColors[group.status]}>{statusText[group.status]}</Tag>
+        {lockedCount > 0 && (
+          <Tag color="red" icon={<LockOutlined />}>{lockedCount}个名额已锁定</Tag>
+        )}
       </Space>
 
       <Card style={{ marginBottom: 16 }}>
@@ -427,8 +562,10 @@ const TourGroupDetail = () => {
       </Card>
 
       <Card>
-        <Tabs defaultActiveKey="tourists">
-          <TabPane tab="游客管理" key="tourists">
+        <Tabs activeKey={activeTab} onChange={handleTabChange}>
+          <TabPane tab={
+            <span>游客管理 {lockedCount > 0 && <Tag color="red" style={{ marginLeft: 6 }}>锁{lockedCount}</Tag>}</span>
+          } key="tourists">
             <div style={{ marginBottom: 16 }}>
               <Row gutter={16}>
                 <Col span={6}>
@@ -443,10 +580,10 @@ const TourGroupDetail = () => {
                 <Col span={6}>
                   <Statistic
                     title="未收金额"
-                    value={totalFee - totalPaid}
+                    value={Math.max(0, totalFee - totalPaid)}
                     precision={2}
                     prefix="¥"
-                    valueStyle={{ color: '#f5222d' }}
+                    valueStyle={{ color: (totalFee - totalPaid) > 0 ? '#f5222d' : '#52c41a' }}
                   />
                 </Col>
               </Row>
@@ -457,7 +594,7 @@ const TourGroupDetail = () => {
               rowKey="id"
               loading={loading}
               columns={touristColumns}
-              scroll={{ x: 1200 }}
+              scroll={{ x: 1400 }}
               pagination={{
                 current: tourists.page,
                 pageSize: tourists.pageSize,
@@ -467,7 +604,7 @@ const TourGroupDetail = () => {
             />
           </TabPane>
 
-          <TabPane tab="自费项目" key="selfpaid">
+          <TabPane tab={`自费项目（${selfPaidItems.length}项，¥${totalSelfPaid.toFixed(2)}）`} key="selfpaid">
             <div style={{ marginBottom: 16 }}>
               <Button type="primary" icon={<PlusOutlined />} onClick={() => {
                 selfPaidForm.resetFields()
@@ -475,20 +612,20 @@ const TourGroupDetail = () => {
               }}>
                 添加自费项目
               </Button>
+              <span style={{ marginLeft: 16, color: '#666' }}>
+                合计：<b style={{ color: '#1890ff' }}>¥{totalSelfPaid.toFixed(2)}</b>
+              </span>
             </div>
             <Table
               dataSource={selfPaidItems}
               rowKey="id"
               columns={selfPaidColumns}
               pagination={false}
-              onExpand={() => loadSelfPaidItems()}
+              locale={{ emptyText: loadedTabs.has('selfpaid') ? '暂无自费项目' : '正在加载数据...' }}
             />
-            <div style={{ textAlign: 'right', marginTop: 16, color: '#999' }}>
-              点击Tab加载数据
-            </div>
           </TabPane>
 
-          <TabPane tab="退款管理" key="refunds">
+          <TabPane tab={`退款管理（${refunds.length}项，¥${totalRefund.toFixed(2)}）`} key="refunds">
             <div style={{ marginBottom: 16 }}>
               <Button type="primary" icon={<PlusOutlined />} onClick={() => {
                 refundForm.resetFields()
@@ -496,16 +633,17 @@ const TourGroupDetail = () => {
               }}>
                 申请退款
               </Button>
+              <span style={{ marginLeft: 16, color: '#666' }}>
+                合计：<b style={{ color: '#fa8c16' }}>¥{totalRefund.toFixed(2)}</b>
+              </span>
             </div>
             <Table
               dataSource={refunds}
               rowKey="id"
               columns={refundColumns}
               pagination={false}
+              locale={{ emptyText: loadedTabs.has('refunds') ? '暂无退款申请' : '正在加载数据...' }}
             />
-            <div style={{ textAlign: 'right', marginTop: 16, color: '#999' }}>
-              点击Tab加载数据
-            </div>
           </TabPane>
         </Tabs>
       </Card>
@@ -572,6 +710,9 @@ const TourGroupDetail = () => {
               <Form.Item name="amount_paid" label="已付金额">
                 <InputNumber min={0} style={{ width: '100%' }} />
               </Form.Item>
+              <div style={{ background: '#fff7e6', padding: 8, borderRadius: 4, fontSize: 12, color: '#d46b08' }}>
+                提示：若付款状态选择「已付款」或已付金额达到基础价，系统将自动解锁该游客名额
+              </div>
             </>
           )}
         </Form>
@@ -585,7 +726,7 @@ const TourGroupDetail = () => {
       >
         <Form form={selfPaidForm} layout="vertical">
           <Form.Item name="tourist_id" label="游客" rules={[{ required: true }]}>
-            <Select placeholder="请选择游客">
+            <Select placeholder="请选择游客" showSearch optionFilterProp="children">
               {tourists.list.map(t => (
                 <Option key={t.id} value={t.id}>{t.name}</Option>
               ))}
@@ -611,7 +752,7 @@ const TourGroupDetail = () => {
       >
         <Form form={refundForm} layout="vertical">
           <Form.Item name="tourist_id" label="游客" rules={[{ required: true }]}>
-            <Select placeholder="请选择游客">
+            <Select placeholder="请选择游客" showSearch optionFilterProp="children">
               {tourists.list.map(t => (
                 <Option key={t.id} value={t.id}>{t.name}</Option>
               ))}
@@ -641,6 +782,29 @@ const TourGroupDetail = () => {
             <h2 style={{ textAlign: 'center', marginBottom: 20 }}>
               {itineraryData.group.group_name} 行程单
             </h2>
+
+            {itineraryData.push_status && (
+              <Card size="small" type="inner"
+                style={{ marginBottom: 16, background: itineraryData.push_status.push_status === 'pushed' ? '#f6ffed' : '#fffbe6',
+                        border: `1px solid ${itineraryData.push_status.push_status === 'pushed' ? '#b7eb8f' : '#ffe58f'}` }}>
+                <Space>
+                  <b>推送状态：</b>
+                  <Tag color={itineraryData.push_status.push_status === 'pushed' ? 'green' : 'orange'}>
+                    {itineraryData.push_status.push_status === 'pushed' ? '已推送给领队' : '尚未推送'}
+                  </Tag>
+                  {itineraryData.push_status.pushed_at && (
+                    <span style={{ fontSize: 12, color: '#52c41a' }}>
+                      推送时间：{itineraryData.push_status.pushed_at}
+                    </span>
+                  )}
+                  {itineraryData.push_status.pushed_to && (
+                    <span style={{ fontSize: 12 }}>
+                      接收人：{itineraryData.push_status.pushed_to}
+                    </span>
+                  )}
+                </Space>
+              </Card>
+            )}
 
             <Divider orientation="left">基本信息</Divider>
             <Descriptions column={2} size="small" bordered style={{ marginBottom: 16 }}>

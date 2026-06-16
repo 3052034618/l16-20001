@@ -1,20 +1,33 @@
 import { useState, useEffect } from 'react'
-import { Card, Select, Button, Descriptions, Table, Divider, message, Space } from 'antd'
-import { FileTextOutlined, PrinterOutlined, SearchOutlined } from '@ant-design/icons'
+import { Card, Select, Button, Descriptions, Table, Divider, message, Space, Tabs, Tag, Modal } from 'antd'
+import {
+  FileTextOutlined,
+  PrinterOutlined,
+  SearchOutlined,
+  SendOutlined,
+  CheckCircleOutlined,
+  HistoryOutlined,
+  ReloadOutlined,
+} from '@ant-design/icons'
 import { TourGroup, ItineraryData } from '../types'
 import jsPDF from 'jspdf'
 import autoTable from 'jspdf-autotable'
 
 const { Option } = Select
+const { TabPane } = Tabs
 
 const ItineraryPage = () => {
   const [groups, setGroups] = useState<TourGroup[]>([])
   const [selectedGroupId, setSelectedGroupId] = useState<number | null>(null)
   const [itineraryData, setItineraryData] = useState<ItineraryData | null>(null)
   const [loading, setLoading] = useState(false)
+  const [pushing, setPushing] = useState(false)
+  const [pushHistory, setPushHistory] = useState<any[]>([])
+  const [loadingHistory, setLoadingHistory] = useState(false)
 
   useEffect(() => {
     loadGroups()
+    loadPushHistory()
   }, [])
 
   const loadGroups = async () => {
@@ -23,6 +36,18 @@ const ItineraryPage = () => {
       setGroups(result.list || [])
     } catch (e) {
       console.error(e)
+    }
+  }
+
+  const loadPushHistory = async () => {
+    setLoadingHistory(true)
+    try {
+      const data = await (window as any).electronAPI.itinerary.pushList()
+      setPushHistory(data || [])
+    } catch (e) {
+      console.error(e)
+    } finally {
+      setLoadingHistory(false)
     }
   }
 
@@ -42,6 +67,38 @@ const ItineraryPage = () => {
     } finally {
       setLoading(false)
     }
+  }
+
+  const handlePushToLeader = async () => {
+    if (!selectedGroupId) {
+      message.warning('请选择旅行团')
+      return
+    }
+    Modal.confirm({
+      title: '推送电子行程单给领队',
+      content: itineraryData?.push_status?.push_status === 'pushed'
+        ? `该行程单已于 ${itineraryData.push_status.pushed_at} 推送给 ${itineraryData.push_status.pushed_to}，确认再次推送？`
+        : '系统将把当前行程单（含所有分配信息）推送给该团领队终端，并记录推送时间与接收人。确认继续？',
+      onOk: async () => {
+        setPushing(true)
+        try {
+          const result = await (window as any).electronAPI.itinerary.pushToLeader(selectedGroupId)
+          if (result && result.success) {
+            message.success(result.message || '推送成功')
+            // 重新生成行程单以获取最新推送状态
+            const data = await (window as any).electronAPI.itinerary.generate(selectedGroupId)
+            setItineraryData(data)
+            loadPushHistory()
+          } else {
+            message.error(result?.message || '推送失败')
+          }
+        } catch (e: any) {
+          message.error(e.message || '推送失败')
+        } finally {
+          setPushing(false)
+        }
+      },
+    })
   }
 
   const handlePrint = () => {
@@ -238,12 +295,25 @@ const ItineraryPage = () => {
       render: (val: string) => val || '-' },
   ]
 
+  const pushHistoryColumns = [
+    { title: 'ID', dataIndex: 'id', key: 'id', width: 60 },
+    { title: '旅行团', dataIndex: 'group_name', key: 'group_name' },
+    { title: '推送状态', dataIndex: 'push_status', key: 'push_status', width: 120,
+      render: (s: string) => s === 'pushed'
+        ? <Tag color="green" icon={<CheckCircleOutlined />}>已推送</Tag>
+        : <Tag color="orange">推送失败</Tag> },
+    { title: '接收人(领队)', dataIndex: 'pushed_to', key: 'pushed_to', width: 140 },
+    { title: '推送时间', dataIndex: 'pushed_at', key: 'pushed_at', width: 160 },
+    { title: '备注', dataIndex: 'remark', key: 'remark',
+      render: (v: string) => v || '-' },
+  ]
+
   return (
     <div>
       <div className="page-title">电子行程单</div>
 
       <Card style={{ marginBottom: 16 }}>
-        <Space>
+        <Space wrap>
           <Select
             placeholder="请选择旅行团"
             style={{ width: 300 }}
@@ -266,6 +336,16 @@ const ItineraryPage = () => {
           </Button>
           {itineraryData && (
             <>
+              <Button
+                type="primary"
+                ghost
+                icon={<SendOutlined />}
+                loading={pushing}
+                onClick={handlePushToLeader}
+                style={{ borderColor: '#52c41a', color: '#52c41a' }}
+              >
+                推送给领队
+              </Button>
               <Button icon={<PrinterOutlined />} onClick={handlePrint}>
                 打印
               </Button>
@@ -274,105 +354,156 @@ const ItineraryPage = () => {
               </Button>
             </>
           )}
+          <Button
+            icon={<ReloadOutlined />}
+            onClick={() => { loadPushHistory() }}
+          >
+            刷新推送记录
+          </Button>
         </Space>
+
+        {itineraryData?.push_status && (
+          <div
+            style={{
+              marginTop: 12,
+              padding: 12,
+              borderRadius: 6,
+              background: itineraryData.push_status.push_status === 'pushed' ? '#f6ffed' : '#fffbe6',
+              border: `1px solid ${itineraryData.push_status.push_status === 'pushed' ? '#b7eb8f' : '#ffe58f'}`,
+            }}
+          >
+            <Space>
+              <b>推送状态：</b>
+              <Tag color={itineraryData.push_status.push_status === 'pushed' ? 'green' : 'orange'} icon={
+                itineraryData.push_status.push_status === 'pushed' ? <CheckCircleOutlined /> : undefined
+              }>
+                {itineraryData.push_status.push_status === 'pushed' ? '已推送给领队' : '尚未推送'}
+              </Tag>
+              {itineraryData.push_status.pushed_at && (
+                <span style={{ fontSize: 12 }}>推送时间：{itineraryData.push_status.pushed_at}</span>
+              )}
+              {itineraryData.push_status.pushed_to && (
+                <span style={{ fontSize: 12 }}>接收人：{itineraryData.push_status.pushed_to}</span>
+              )}
+            </Space>
+          </div>
+        )}
       </Card>
 
-      {itineraryData && (
-        <Card className="itinerary-print-area">
-          <h2 style={{ textAlign: 'center', marginBottom: 20, color: '#1890ff' }}>
-            {itineraryData.group.group_name} 行程单
-          </h2>
-          <p style={{ textAlign: 'center', color: '#999', marginBottom: 20 }}>
-            旅行社团队操作与资源调度系统
-          </p>
+      <Tabs defaultActiveKey="itinerary">
+        <TabPane tab={<span><FileTextOutlined /> 行程单预览</span>} key="itinerary">
+          {itineraryData && (
+            <Card className="itinerary-print-area">
+              <h2 style={{ textAlign: 'center', marginBottom: 20, color: '#1890ff' }}>
+                {itineraryData.group.group_name} 行程单
+              </h2>
+              <p style={{ textAlign: 'center', color: '#999', marginBottom: 20 }}>
+                旅行社团队操作与资源调度系统
+              </p>
 
-          <Divider orientation="left" style={{ color: '#1890ff', fontWeight: 'bold' }}>
-            一、基本信息
-          </Divider>
-          <Descriptions column={2} size="small" bordered style={{ marginBottom: 16 }}>
-            <Descriptions.Item label="团名称">{itineraryData.group.group_name}</Descriptions.Item>
-            <Descriptions.Item label="线路名称">{itineraryData.group.route_name}</Descriptions.Item>
-            <Descriptions.Item label="出发日期">{itineraryData.group.departure_date || '-'}</Descriptions.Item>
-            <Descriptions.Item label="返程日期">{itineraryData.group.return_date || '-'}</Descriptions.Item>
-            <Descriptions.Item label="团队人数">{itineraryData.tourists.length} 人</Descriptions.Item>
-            <Descriptions.Item label="基础价格">¥{itineraryData.group.base_price?.toFixed(2)}</Descriptions.Item>
-          </Descriptions>
-
-          {itineraryData.flight && (
-            <>
-              <Divider orientation="left" style={{ color: '#52c41a', fontWeight: 'bold' }}>
-                二、航班信息
+              <Divider orientation="left" style={{ color: '#1890ff', fontWeight: 'bold' }}>
+                一、基本信息
               </Divider>
               <Descriptions column={2} size="small" bordered style={{ marginBottom: 16 }}>
-                <Descriptions.Item label="航班号">{itineraryData.flight.flight_number}</Descriptions.Item>
-                <Descriptions.Item label="航空公司">{itineraryData.flight.airline || '-'}</Descriptions.Item>
-                <Descriptions.Item label="出发城市">{itineraryData.flight.departure_city || '-'}</Descriptions.Item>
-                <Descriptions.Item label="到达城市">{itineraryData.flight.arrival_city || '-'}</Descriptions.Item>
-                <Descriptions.Item label="出发时间">{itineraryData.flight.departure_time || '-'}</Descriptions.Item>
-                <Descriptions.Item label="到达时间">{itineraryData.flight.arrival_time || '-'}</Descriptions.Item>
+                <Descriptions.Item label="团名称">{itineraryData.group.group_name}</Descriptions.Item>
+                <Descriptions.Item label="线路名称">{itineraryData.group.route_name}</Descriptions.Item>
+                <Descriptions.Item label="出发日期">{itineraryData.group.departure_date || '-'}</Descriptions.Item>
+                <Descriptions.Item label="返程日期">{itineraryData.group.return_date || '-'}</Descriptions.Item>
+                <Descriptions.Item label="团队人数">{itineraryData.tourists.length} 人</Descriptions.Item>
+                <Descriptions.Item label="基础价格">¥{itineraryData.group.base_price?.toFixed(2)}</Descriptions.Item>
               </Descriptions>
-            </>
-          )}
 
-          {itineraryData.hotel && (
-            <>
-              <Divider orientation="left" style={{ color: '#faad14', fontWeight: 'bold' }}>
-                三、住宿信息
+              {itineraryData.flight && (
+                <>
+                  <Divider orientation="left" style={{ color: '#52c41a', fontWeight: 'bold' }}>
+                    二、航班信息
+                  </Divider>
+                  <Descriptions column={2} size="small" bordered style={{ marginBottom: 16 }}>
+                    <Descriptions.Item label="航班号">{itineraryData.flight.flight_number}</Descriptions.Item>
+                    <Descriptions.Item label="航空公司">{itineraryData.flight.airline || '-'}</Descriptions.Item>
+                    <Descriptions.Item label="出发城市">{itineraryData.flight.departure_city || '-'}</Descriptions.Item>
+                    <Descriptions.Item label="到达城市">{itineraryData.flight.arrival_city || '-'}</Descriptions.Item>
+                    <Descriptions.Item label="出发时间">{itineraryData.flight.departure_time || '-'}</Descriptions.Item>
+                    <Descriptions.Item label="到达时间">{itineraryData.flight.arrival_time || '-'}</Descriptions.Item>
+                  </Descriptions>
+                </>
+              )}
+
+              {itineraryData.hotel && (
+                <>
+                  <Divider orientation="left" style={{ color: '#faad14', fontWeight: 'bold' }}>
+                    三、住宿信息
+                  </Divider>
+                  <Descriptions column={2} size="small" bordered style={{ marginBottom: 16 }}>
+                    <Descriptions.Item label="酒店名称">{itineraryData.hotel.name}</Descriptions.Item>
+                    <Descriptions.Item label="星级">
+                      <span style={{ color: '#faad14' }}>
+                        {'★'.repeat(itineraryData.hotel.star_rating)}
+                        {'☆'.repeat(5 - itineraryData.hotel.star_rating)}
+                      </span>
+                    </Descriptions.Item>
+                    <Descriptions.Item label="城市">{itineraryData.hotel.city || '-'}</Descriptions.Item>
+                    <Descriptions.Item label="地址">{itineraryData.hotel.address || '-'}</Descriptions.Item>
+                    <Descriptions.Item label="每晚价格">¥{itineraryData.hotel.price_per_night?.toFixed(2)}</Descriptions.Item>
+                    <Descriptions.Item label="设施">{itineraryData.hotel.facilities || '-'}</Descriptions.Item>
+                  </Descriptions>
+                </>
+              )}
+
+              {itineraryData.guide && (
+                <>
+                  <Divider orientation="left" style={{ color: '#722ed1', fontWeight: 'bold' }}>
+                    四、导游信息
+                  </Divider>
+                  <Descriptions column={2} size="small" bordered style={{ marginBottom: 16 }}>
+                    <Descriptions.Item label="导游姓名">{(itineraryData.guide as any).guide_name || '-'}</Descriptions.Item>
+                    <Descriptions.Item label="联系电话">{(itineraryData.guide as any).guide_phone || '-'}</Descriptions.Item>
+                  </Descriptions>
+                </>
+              )}
+
+              <Divider orientation="left" style={{ color: '#f5222d', fontWeight: 'bold' }}>
+                五、游客名单
               </Divider>
-              <Descriptions column={2} size="small" bordered style={{ marginBottom: 16 }}>
-                <Descriptions.Item label="酒店名称">{itineraryData.hotel.name}</Descriptions.Item>
-                <Descriptions.Item label="星级">
-                  <span style={{ color: '#faad14' }}>
-                    {'★'.repeat(itineraryData.hotel.star_rating)}
-                    {'☆'.repeat(5 - itineraryData.hotel.star_rating)}
-                  </span>
-                </Descriptions.Item>
-                <Descriptions.Item label="城市">{itineraryData.hotel.city || '-'}</Descriptions.Item>
-                <Descriptions.Item label="地址">{itineraryData.hotel.address || '-'}</Descriptions.Item>
-                <Descriptions.Item label="每晚价格">¥{itineraryData.hotel.price_per_night?.toFixed(2)}</Descriptions.Item>
-                <Descriptions.Item label="设施">{itineraryData.hotel.facilities || '-'}</Descriptions.Item>
-              </Descriptions>
-            </>
+              <Table
+                dataSource={itineraryData.tourists}
+                rowKey="id"
+                columns={touristColumns}
+                pagination={false}
+                size="small"
+                scroll={{ x: 1000 }}
+              />
+
+              <div style={{ textAlign: 'right', marginTop: 20, color: '#999', fontSize: 12 }}>
+                生成时间：{new Date().toLocaleString()}
+                <br />
+                本行程单由旅行社团队操作与资源调度系统自动生成
+              </div>
+            </Card>
           )}
 
-          {itineraryData.guide && (
-            <>
-              <Divider orientation="left" style={{ color: '#722ed1', fontWeight: 'bold' }}>
-                四、导游信息
-              </Divider>
-              <Descriptions column={2} size="small" bordered style={{ marginBottom: 16 }}>
-                <Descriptions.Item label="导游姓名">{(itineraryData.guide as any).guide_name || '-'}</Descriptions.Item>
-                <Descriptions.Item label="联系电话">{(itineraryData.guide as any).guide_phone || '-'}</Descriptions.Item>
-              </Descriptions>
-            </>
+          {!itineraryData && (
+            <Card style={{ textAlign: 'center', padding: '60px 0', color: '#999' }}>
+              <FileTextOutlined style={{ fontSize: 48, marginBottom: 16 }} />
+              <p>请选择旅行团后点击"生成行程单"</p>
+            </Card>
           )}
+        </TabPane>
 
-          <Divider orientation="left" style={{ color: '#f5222d', fontWeight: 'bold' }}>
-            五、游客名单
-          </Divider>
-          <Table
-            dataSource={itineraryData.tourists}
-            rowKey="id"
-            columns={touristColumns}
-            pagination={false}
-            size="small"
-            scroll={{ x: 1000 }}
-          />
-
-          <div style={{ textAlign: 'right', marginTop: 20, color: '#999', fontSize: 12 }}>
-            生成时间：{new Date().toLocaleString()}
-            <br />
-            本行程单由旅行社团队操作与资源调度系统自动生成
-          </div>
-        </Card>
-      )}
-
-      {!itineraryData && (
-        <Card style={{ textAlign: 'center', padding: '60px 0', color: '#999' }}>
-          <FileTextOutlined style={{ fontSize: 48, marginBottom: 16 }} />
-          <p>请选择旅行团后点击"生成行程单"</p>
-        </Card>
-      )}
+        <TabPane tab={<span><HistoryOutlined /> 推送历史</span>} key="push-history">
+          <Card>
+            <Table
+              dataSource={pushHistory}
+              rowKey="id"
+              loading={loadingHistory}
+              columns={pushHistoryColumns}
+              pagination={{ pageSize: 20 }}
+              scroll={{ x: 900 }}
+              locale={{ emptyText: '暂无推送记录' }}
+            />
+          </Card>
+        </TabPane>
+      </Tabs>
     </div>
   )
 }

@@ -32,6 +32,9 @@ export interface Tourist {
   hotel_room?: string
   hotel_id?: number
   flight_id?: number
+  is_locked?: number
+  locked_at?: string
+  lock_reason?: string
   created_at: string
   updated_at?: string
 }
@@ -86,6 +89,10 @@ export interface GuideSchedule {
   guide_id: number
   guide_name?: string
   group_name?: string
+  original_guide_id?: number
+  original_guide_name?: string
+  swap_reason?: string
+  swapped_at?: string
   start_date: string
   end_date: string
   estimated_hours: number

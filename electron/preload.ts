@@ -15,6 +15,7 @@ const api = {
     update: (id: number, data: any) => ipcRenderer.invoke('tourists:update', id, data),
     delete: (id: number) => ipcRenderer.invoke('tourists:delete', id),
     updateStatus: (id: number, status: string) => ipcRenderer.invoke('tourists:updateStatus', id, status),
+    unlock: (id: number) => ipcRenderer.invoke('tourists:unlock', id),
   },
   hotels: {
     list: (params?: any) => ipcRenderer.invoke('hotels:list', params),
@@ -38,6 +39,7 @@ const api = {
     list: (params?: any) => ipcRenderer.invoke('guide-schedules:list', params),
     create: (data: any) => ipcRenderer.invoke('guide-schedules:create', data),
     update: (id: number, data: any) => ipcRenderer.invoke('guide-schedules:update', id, data),
+    autoSchedule: () => ipcRenderer.invoke('guide-schedules:autoSchedule'),
   },
   shiftSwaps: {
     list: (params?: any) => ipcRenderer.invoke('shift-swaps:list', params),
@@ -76,6 +78,8 @@ const api = {
   },
   itinerary: {
     generate: (groupId: number) => ipcRenderer.invoke('itinerary:generate', groupId),
+    pushToLeader: (groupId: number) => ipcRenderer.invoke('itinerary:pushToLeader', groupId),
+    pushList: () => ipcRenderer.invoke('itinerary:pushList'),
   },
 }
 

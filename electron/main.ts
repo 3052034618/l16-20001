@@ -48,6 +48,16 @@ app.on('window-all-closed', () => {
   }
 })
 
+function normalizeLanguages(val: any): string {
+  if (Array.isArray(val)) {
+    return val.map((x: any) => String(x).trim()).filter(Boolean).join(',')
+  }
+  if (typeof val === 'string') {
+    return val
+  }
+  return String(val || '')
+}
+
 function registerIpcHandlers() {
   const db = getDatabase()
 
@@ -167,8 +177,8 @@ function registerIpcHandlers() {
         group_id, name, id_card, phone, age, gender,
         special_needs, dietary_requirements, status,
         payment_status, amount_paid, seat_number, hotel_room,
-        created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'registered', 'unpaid', 0, NULL, NULL, datetime('now'))
+        is_locked, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'registered', 'unpaid', 0, NULL, NULL, 0, datetime('now'))
     `)
     const result = stmt.run(
       data.group_id,
@@ -184,6 +194,22 @@ function registerIpcHandlers() {
   })
 
   ipcMain.handle('tourists:update', (_event, id, data) => {
+    const groupStmt = db.prepare('SELECT base_price FROM tour_groups WHERE id = ?')
+    const touristStmt = db.prepare('SELECT group_id FROM tourists WHERE id = ?')
+    const tourist: any = touristStmt.get(id)
+    const group: any = tourist ? groupStmt.get(tourist.group_id) : null
+    const basePrice = group?.base_price || 0
+
+    let isLocked = data.is_locked
+    let lockReason = data.lock_reason
+    let lockedAt = data.locked_at
+
+    if (data.payment_status === 'paid' || (Number(data.amount_paid) >= basePrice && basePrice > 0)) {
+      isLocked = 0
+      lockReason = null
+      lockedAt = null
+    }
+
     const stmt = db.prepare(`
       UPDATE tourists SET
         group_id = ?, name = ?, id_card = ?, phone = ?,
@@ -191,6 +217,9 @@ function registerIpcHandlers() {
         dietary_requirements = ?, status = ?,
         payment_status = ?, amount_paid = ?,
         seat_number = ?, hotel_room = ?,
+        is_locked = COALESCE(?, is_locked),
+        lock_reason = ?,
+        locked_at = ?,
         updated_at = datetime('now')
       WHERE id = ?
     `)
@@ -208,6 +237,9 @@ function registerIpcHandlers() {
       data.amount_paid,
       data.seat_number,
       data.hotel_room,
+      isLocked,
+      lockReason,
+      lockedAt,
       id
     )
     return { changes: result.changes }
@@ -224,6 +256,15 @@ function registerIpcHandlers() {
       UPDATE tourists SET status = ?, updated_at = datetime('now') WHERE id = ?
     `)
     const result = stmt.run(status, id)
+    return { changes: result.changes }
+  })
+
+  ipcMain.handle('tourists:unlock', (_event, id) => {
+    const stmt = db.prepare(`
+      UPDATE tourists SET is_locked = 0, lock_reason = NULL, locked_at = NULL, updated_at = datetime('now')
+      WHERE id = ?
+    `)
+    const result = stmt.run(id)
     return { changes: result.changes }
   })
 
@@ -411,6 +452,7 @@ function registerIpcHandlers() {
   })
 
   ipcMain.handle('guides:create', (_event, data) => {
+    const languagesStr = normalizeLanguages(data.languages)
     const stmt = db.prepare(`
       INSERT INTO guides (
         name, phone, id_card, languages,
@@ -422,7 +464,7 @@ function registerIpcHandlers() {
       data.name,
       data.phone,
       data.id_card,
-      data.languages,
+      languagesStr,
       data.years_of_experience,
       data.rating || 5.0,
       data.max_monthly_hours || 160
@@ -431,6 +473,7 @@ function registerIpcHandlers() {
   })
 
   ipcMain.handle('guides:update', (_event, id, data) => {
+    const languagesStr = normalizeLanguages(data.languages)
     const stmt = db.prepare(`
       UPDATE guides SET
         name = ?, phone = ?, id_card = ?, languages = ?,
@@ -442,7 +485,7 @@ function registerIpcHandlers() {
       data.name,
       data.phone,
       data.id_card,
-      data.languages,
+      languagesStr,
       data.years_of_experience,
       data.rating,
       data.max_monthly_hours,
@@ -459,24 +502,26 @@ function registerIpcHandlers() {
     const stmtParams: any[] = []
 
     if (groupId) {
-      whereClause += ' AND group_id = ?'
+      whereClause += ' AND gs.group_id = ?'
       stmtParams.push(groupId)
     }
     if (guideId) {
-      whereClause += ' AND guide_id = ?'
+      whereClause += ' AND gs.guide_id = ?'
       stmtParams.push(guideId)
     }
 
-    const countStmt = db.prepare(`SELECT COUNT(*) as total FROM guide_schedules ${whereClause}`)
+    const countStmt = db.prepare(`SELECT COUNT(*) as total FROM guide_schedules gs ${whereClause}`)
     const { total } = countStmt.get(...stmtParams) as { total: number }
 
     const listStmt = db.prepare(`
-      SELECT gs.*, g.name as guide_name, tg.group_name
+      SELECT gs.*, g.name as guide_name, tg.group_name,
+             og.name as original_guide_name
       FROM guide_schedules gs
       LEFT JOIN guides g ON gs.guide_id = g.id
       LEFT JOIN tour_groups tg ON gs.group_id = tg.id
+      LEFT JOIN guides og ON gs.original_guide_id = og.id
       ${whereClause}
-      ORDER BY gs.start_date DESC
+      ORDER BY gs.created_at DESC
       LIMIT ? OFFSET ?
     `)
     const list = listStmt.all(...stmtParams, pageSize, offset)
@@ -485,19 +530,26 @@ function registerIpcHandlers() {
   })
 
   ipcMain.handle('guide-schedules:create', (_event, data) => {
-    const stmt = db.prepare(`
+    const insertStmt = db.prepare(`
       INSERT INTO guide_schedules (
         group_id, guide_id, start_date, end_date,
         estimated_hours, status, created_at
       ) VALUES (?, ?, ?, ?, ?, 'scheduled', datetime('now'))
     `)
-    const result = stmt.run(
+    const result = insertStmt.run(
       data.group_id,
       data.guide_id,
       data.start_date,
       data.end_date,
       data.estimated_hours
     )
+    if (data.estimated_hours) {
+      const updateGuideStmt = db.prepare(`
+        UPDATE guides SET current_month_hours = current_month_hours + ?, updated_at = datetime('now')
+        WHERE id = ?
+      `)
+      updateGuideStmt.run(Number(data.estimated_hours), data.guide_id)
+    }
     return { id: result.lastInsertRowid }
   })
 
@@ -521,6 +573,116 @@ function registerIpcHandlers() {
     return { changes: result.changes }
   })
 
+  ipcMain.handle('guide-schedules:autoSchedule', async () => {
+    const unscheduledGroupsStmt = db.prepare(`
+      SELECT tg.*
+      FROM tour_groups tg
+      LEFT JOIN guide_schedules gs ON tg.id = gs.group_id
+      WHERE gs.id IS NULL
+        AND tg.status IN ('draft','allocated','confirmed')
+        AND tg.departure_date IS NOT NULL
+      ORDER BY tg.departure_date ASC
+    `)
+    const groups: any[] = unscheduledGroupsStmt.all()
+
+    if (groups.length === 0) {
+      return { success: true, message: '暂无可排班的旅行团', created: 0, skipped: [] }
+    }
+
+    const allGuidesStmt = db.prepare(`
+      SELECT * FROM guides WHERE status = 'active'
+    `)
+    const guides: any[] = allGuidesStmt.all()
+
+    const insertScheduleStmt = db.prepare(`
+      INSERT INTO guide_schedules (
+        group_id, guide_id, start_date, end_date,
+        estimated_hours, status, created_at
+      ) VALUES (?, ?, ?, ?, ?, 'scheduled', datetime('now'))
+    `)
+    const updateHoursStmt = db.prepare(`
+      UPDATE guides SET current_month_hours = current_month_hours + ?, updated_at = datetime('now')
+      WHERE id = ?
+    `)
+
+    let createdCount = 0
+    const skipped: any[] = []
+
+    const txn = db.transaction(() => {
+      for (const group of groups) {
+        const requiredLangs = (group.guide_language_requirement || '中文')
+          .split(/[,，]/)
+          .map((s: string) => s.trim())
+          .filter(Boolean)
+
+        let days = 5
+        if (group.departure_date && group.return_date) {
+          const d1 = new Date(group.departure_date).getTime()
+          const d2 = new Date(group.return_date).getTime()
+          const diff = Math.ceil((d2 - d1) / (1000 * 60 * 60 * 24))
+          if (diff > 0) days = diff
+        }
+        const estimatedHours = days * 10
+
+        let matchedGuide: any = null
+        for (const guide of guides) {
+          const guideLangs = (guide.languages || '')
+            .split(/[,，]/)
+            .map((s: string) => s.trim())
+            .filter(Boolean)
+          const allMatch = requiredLangs.every((rl: string) =>
+            guideLangs.some(gl => gl === rl || gl.includes(rl) || rl.includes(gl))
+          )
+          if (!allMatch) continue
+          const totalHours = (guide.current_month_hours || 0) + estimatedHours
+          if (totalHours > (guide.max_monthly_hours || 160)) continue
+          if (!matchedGuide || (guide.rating || 0) > (matchedGuide.rating || 0)) {
+            matchedGuide = guide
+          }
+        }
+
+        if (!matchedGuide) {
+          skipped.push({
+            group_id: group.id,
+            group_name: group.group_name,
+            reason: requiredLangs.length > 0
+              ? `无符合语言要求（${requiredLangs.join('/')}）且工时未超限的导游`
+              : '无可用导游'
+          })
+          continue
+        }
+
+        insertScheduleStmt.run(
+          group.id,
+          matchedGuide.id,
+          group.departure_date,
+          group.return_date,
+          estimatedHours
+        )
+        updateHoursStmt.run(estimatedHours, matchedGuide.id)
+        matchedGuide.current_month_hours = (matchedGuide.current_month_hours || 0) + estimatedHours
+        createdCount++
+      }
+    })
+
+    try {
+      txn()
+      return {
+        success: true,
+        message: `排班完成，成功生成 ${createdCount} 条排班`,
+        created: createdCount,
+        skipped,
+      }
+    } catch (e: any) {
+      return {
+        success: false,
+        message: '排班失败: ' + (e.message || String(e)),
+        created: 0,
+        skipped: [],
+      }
+    }
+  })
+
   ipcMain.handle('shift-swaps:list', (_event, params) => {
     const { status, page = 1, pageSize = 50 } = params || {}
     const offset = (page - 1) * pageSize
@@ -536,10 +698,13 @@ function registerIpcHandlers() {
     const { total } = countStmt.get(...stmtParams) as { total: number }
 
     const listStmt = db.prepare(`
-      SELECT ss.*, g1.name as requester_name, g2.name as target_guide_name
+      SELECT ss.*, g1.name as requester_name, g2.name as target_guide_name,
+             tg.group_name as schedule_group_name
       FROM shift_swaps ss
       LEFT JOIN guides g1 ON ss.requester_guide_id = g1.id
       LEFT JOIN guides g2 ON ss.target_guide_id = g2.id
+      LEFT JOIN guide_schedules gs ON ss.schedule_id = gs.id
+      LEFT JOIN tour_groups tg ON gs.group_id = tg.id
       ${whereClause}
       ORDER BY ss.created_at DESC
       LIMIT ? OFFSET ?
@@ -566,19 +731,81 @@ function registerIpcHandlers() {
   })
 
   ipcMain.handle('shift-swaps:approve', (_event, id) => {
-    const db = getDatabase()
-    const stmt = db.prepare(`
-      UPDATE shift_swaps SET status = 'approved', approved_at = datetime('now')
-      WHERE id = ?
-    `)
-    const result = stmt.run(id)
-    return { changes: result.changes }
+    const getSwapStmt = db.prepare('SELECT * FROM shift_swaps WHERE id = ?')
+    const swap: any = getSwapStmt.get(id)
+    if (!swap) {
+      return { changes: 0, error: '调班申请不存在' }
+    }
+    if (swap.status !== 'pending') {
+      return { changes: 0, error: '该申请已被处理' }
+    }
+    const getScheduleStmt = db.prepare('SELECT * FROM guide_schedules WHERE id = ?')
+    const schedule: any = getScheduleStmt.get(swap.schedule_id)
+    if (!schedule) {
+      return { changes: 0, error: '排班记录不存在' }
+    }
+    const originalGuideId = schedule.guide_id
+    if (Number(originalGuideId) !== Number(swap.requester_guide_id)) {
+      return { changes: 0, error: '申请人与当前排班导游不符，无法审批' }
+    }
+    const targetGuideStmt = db.prepare('SELECT * FROM guides WHERE id = ?')
+    const targetGuide: any = targetGuideStmt.get(swap.target_guide_id)
+    if (!targetGuide) {
+      return { changes: 0, error: '目标导游不存在' }
+    }
+    const estHours = Number(schedule.estimated_hours || 0)
+    const newHours = (targetGuide.current_month_hours || 0) + estHours
+    if (newHours > (targetGuide.max_monthly_hours || 160)) {
+      return { changes: 0, error: `目标导游本月工时将超过上限${targetGuide.max_monthly_hours}小时，无法调班` }
+    }
+
+    const txn = db.transaction(() => {
+      const updateSwapStmt = db.prepare(`
+        UPDATE shift_swaps SET status = 'approved', approved_at = datetime('now') WHERE id = ?
+      `)
+      updateSwapStmt.run(id)
+
+      const updateReqStmt = db.prepare(`
+        UPDATE guides SET current_month_hours = current_month_hours - ?, updated_at = datetime('now')
+        WHERE id = ? AND current_month_hours >= ?
+      `)
+      updateReqStmt.run(estHours, originalGuideId, estHours)
+
+      const updateTgtStmt = db.prepare(`
+        UPDATE guides SET current_month_hours = current_month_hours + ?, updated_at = datetime('now')
+        WHERE id = ?
+      `)
+      updateTgtStmt.run(estHours, swap.target_guide_id)
+
+      const updateScheduleStmt = db.prepare(`
+        UPDATE guide_schedules SET
+          guide_id = ?,
+          original_guide_id = ?,
+          swap_reason = ?,
+          swapped_at = datetime('now'),
+          updated_at = datetime('now')
+        WHERE id = ?
+      `)
+      updateScheduleStmt.run(
+        swap.target_guide_id,
+        originalGuideId,
+        swap.reason,
+        swap.schedule_id
+      )
+    })
+
+    try {
+      txn()
+      return { changes: 1 }
+    } catch (e: any) {
+      return { changes: 0, error: e.message || String(e) }
+    }
   })
 
   ipcMain.handle('shift-swaps:reject', (_event, id, rejectReason) => {
     const stmt = db.prepare(`
       UPDATE shift_swaps SET status = 'rejected', reject_reason = ?, rejected_at = datetime('now')
-      WHERE id = ?
+      WHERE id = ? AND status = 'pending'
     `)
     const result = stmt.run(rejectReason, id)
     return { changes: result.changes }
@@ -612,7 +839,6 @@ function registerIpcHandlers() {
   })
 
   ipcMain.handle('finance:createSettlement', (_event, groupId) => {
-    const db = getDatabase()
     const groupStmt = db.prepare('SELECT * FROM tour_groups WHERE id = ?')
     const group = groupStmt.get(groupId) as any
 
@@ -623,9 +849,9 @@ function registerIpcHandlers() {
     const touristsStmt = db.prepare('SELECT * FROM tourists WHERE group_id = ?')
     const tourists = touristsStmt.all(groupId) as any[]
 
-    const totalFee = tourists.length * group.base_price
+    const totalFee = tourists.length * Number(group.base_price || 0)
     let totalPaid = 0
-    tourists.forEach(t => { totalPaid += t.amount_paid || 0 })
+    tourists.forEach(t => { totalPaid += Number(t.amount_paid || 0) })
 
     const selfPaidStmt = db.prepare('SELECT COALESCE(SUM(amount), 0) as total FROM self_paid_items WHERE group_id = ?')
     const { total: totalSelfPaid } = selfPaidStmt.get(groupId) as { total: number }
@@ -633,7 +859,7 @@ function registerIpcHandlers() {
     const refundStmt = db.prepare('SELECT COALESCE(SUM(amount), 0) as total FROM refunds WHERE group_id = ?')
     const { total: totalRefund } = refundStmt.get(groupId) as { total: number }
 
-    const netAmount = totalFee + totalSelfPaid - totalRefund
+    const netAmount = Number(totalFee) + Number(totalSelfPaid || 0) - Number(totalRefund || 0)
 
     const insertStmt = db.prepare(`
       INSERT INTO finance_settlements (
@@ -645,12 +871,12 @@ function registerIpcHandlers() {
       groupId,
       totalFee,
       totalPaid,
-      totalSelfPaid,
-      totalRefund,
+      totalSelfPaid || 0,
+      totalRefund || 0,
       netAmount,
       tourists.length
     )
-    return { id: result.lastInsertRowid }
+    return { id: result.lastInsertRowid, totalFee, totalPaid, totalSelfPaid, totalRefund, netAmount }
   })
 
   ipcMain.handle('finance:approveSettlement', (_event, id) => {
@@ -692,7 +918,7 @@ function registerIpcHandlers() {
       data.group_id,
       data.tourist_id,
       data.item_name,
-      data.amount,
+      Number(data.amount || 0),
       data.description
     )
     return { id: result.lastInsertRowid }
@@ -718,20 +944,18 @@ function registerIpcHandlers() {
     const result = stmt.run(
       data.group_id,
       data.tourist_id,
-      data.amount,
+      Number(data.amount || 0),
       data.reason
     )
     return { id: result.lastInsertRowid }
   })
 
   ipcMain.handle('resource:allocate', (_event, groupId) => {
-    const db = getDatabase()
-
     const groupStmt = db.prepare('SELECT * FROM tour_groups WHERE id = ?')
     const group = groupStmt.get(groupId) as any
 
     if (!group) {
-      throw new Error('团不存在')
+      return { success: false, message: '团不存在' }
     }
 
     const touristsStmt = db.prepare('SELECT * FROM tourists WHERE group_id = ?')
@@ -741,16 +965,47 @@ function registerIpcHandlers() {
       return { success: false, message: '该团暂无游客' }
     }
 
+    const specialCount = tourists.filter(t => t.special_needs && t.special_needs.length > 0).length
+    const normalCount = tourists.length - specialCount
+    const neededRooms = specialCount + Math.ceil(normalCount / 2)
+
+    if (neededRooms <= 0) {
+      return { success: false, message: '房间数计算异常' }
+    }
+
     const hotelsStmt = db.prepare(`
       SELECT * FROM hotels
       WHERE star_rating >= ? AND available_rooms >= ?
       ORDER BY star_rating ASC, price_per_night ASC
       LIMIT 1
     `)
-    const hotel = hotelsStmt.get(group.hotel_star_requirement || 3, Math.ceil(tourists.length / 2)) as any
+    const hotel = hotelsStmt.get(
+      group.hotel_star_requirement || 3,
+      neededRooms
+    ) as any
 
     if (!hotel) {
-      return { success: false, message: '没有符合条件的酒店房源' }
+      const checkStmt = db.prepare(`
+        SELECT name, available_rooms, star_rating FROM hotels
+        WHERE star_rating >= ?
+        ORDER BY available_rooms DESC
+        LIMIT 3
+      `)
+      const candidates = checkStmt.all(group.hotel_star_requirement || 3) as any[]
+      const detail = candidates.length > 0
+        ? '最高可用: ' + candidates.map(c => `${c.name}(${c.star_rating}星,剩${c.available_rooms}间)`).join('; ')
+        : '无符合星级的酒店'
+      return {
+        success: false,
+        message: `酒店库存不足，需要 ${neededRooms} 间（特殊需求${specialCount}人需单人房+普通${normalCount}人需${Math.ceil(normalCount/2)}间标准房）。${detail}`,
+      }
+    }
+
+    if (hotel.available_rooms < neededRooms) {
+      return {
+        success: false,
+        message: `酒店可用房间(${hotel.available_rooms}间)不足，需要${neededRooms}间`,
+      }
     }
 
     const flightsStmt = db.prepare(`
@@ -762,7 +1017,7 @@ function registerIpcHandlers() {
     const flight = flightsStmt.get(tourists.length) as any
 
     if (!flight) {
-      return { success: false, message: '没有足够的机位' }
+      return { success: false, message: `没有足够的机位(需要${tourists.length}个)` }
     }
 
     const sortedTourists = [...tourists].sort((a, b) => {
@@ -780,63 +1035,95 @@ function registerIpcHandlers() {
     `)
 
     const roomAssignments: { [key: string]: string[] } = {}
-    let currentRoom = 101
-    let currentRoomOccupants: string[] = []
+    let currentRoomNum = 101
+    let currentRoomOccupants: { id: number; name: string; idx: number }[] = []
 
-    for (let i = 0; i < sortedTourists.length; i++) {
-      const tourist = sortedTourists[i]
-      const seatNumber = i + 1
+    const txn = db.transaction(() => {
+      for (let i = 0; i < sortedTourists.length; i++) {
+        const tourist = sortedTourists[i]
+        const seatNumber = i + 1
 
-      if (tourist.special_needs) {
-        const roomKey = `单人房${currentRoom}`
-        roomAssignments[roomKey] = [tourist.name]
-        updateTouristStmt.run(seatNumber, roomKey, flight.id, hotel.id, tourist.id)
-        currentRoom++
-      } else {
-        currentRoomOccupants.push(tourist.name)
-        if (currentRoomOccupants.length === 2 || i === sortedTourists.length - 1) {
-          const roomKey = `标准房${currentRoom}`
-          roomAssignments[roomKey] = [...currentRoomOccupants]
-          currentRoomOccupants.forEach((name) => {
-            const t = sortedTourists.find(x => x.name === name)
-            if (t) {
-              updateTouristStmt.run(sortedTourists.indexOf(t) + 1, roomKey, flight.id, hotel.id, t.id)
-            }
-          })
-          currentRoom++
-          currentRoomOccupants = []
+        if (tourist.special_needs) {
+          const roomKey = `单人房${currentRoomNum}`
+          roomAssignments[roomKey] = [tourist.name]
+          updateTouristStmt.run(seatNumber, roomKey, flight.id, hotel.id, tourist.id)
+          currentRoomNum++
+        } else {
+          currentRoomOccupants.push({ id: tourist.id, name: tourist.name, idx: i })
+          if (currentRoomOccupants.length === 2 || i === sortedTourists.length - 1) {
+            const roomKey = `标准房${currentRoomNum}`
+            roomAssignments[roomKey] = currentRoomOccupants.map(x => x.name)
+            currentRoomOccupants.forEach(person => {
+              const actualSeat = person.idx + 1
+              updateTouristStmt.run(actualSeat, roomKey, flight.id, hotel.id, person.id)
+            })
+            currentRoomNum++
+            currentRoomOccupants = []
+          }
         }
       }
-    }
 
-    const updateHotelStmt = db.prepare(`
-      UPDATE hotels SET available_rooms = available_rooms - ? WHERE id = ?
-    `)
-    updateHotelStmt.run(currentRoom - 101, hotel.id)
+      const roomsConsumed = currentRoomNum - 101
+      if (roomsConsumed !== neededRooms) {
+        throw new Error(`房间分配异常:计算${neededRooms}间，实际${roomsConsumed}间`)
+      }
 
-    const updateFlightStmt = db.prepare(`
-      UPDATE flights SET available_seats = available_seats - ? WHERE id = ?
-    `)
-    updateFlightStmt.run(tourists.length, flight.id)
+      const updateHotelStmt = db.prepare(`
+        UPDATE hotels SET
+          available_rooms = available_rooms - ?,
+          updated_at = datetime('now')
+        WHERE id = ? AND available_rooms >= ?
+      `)
+      const hotelRes = updateHotelStmt.run(roomsConsumed, hotel.id, roomsConsumed)
+      if (hotelRes.changes !== 1) {
+        throw new Error('酒店库存变更失败，可能库存已被占用')
+      }
 
-    const groupUpdateStmt = db.prepare(`
-      UPDATE tour_groups SET hotel_id = ?, flight_id = ?, status = 'allocated'
-      WHERE id = ?
-    `)
-    groupUpdateStmt.run(hotel.id, flight.id, groupId)
+      const updateFlightStmt = db.prepare(`
+        UPDATE flights SET
+          available_seats = available_seats - ?,
+          updated_at = datetime('now')
+        WHERE id = ? AND available_seats >= ?
+      `)
+      const flightRes = updateFlightStmt.run(tourists.length, flight.id, tourists.length)
+      if (flightRes.changes !== 1) {
+        throw new Error('航班库存变更失败')
+      }
 
-    return {
-      success: true,
-      hotel: { id: hotel.id, name: hotel.name, star_rating: hotel.star_rating },
-      flight: { id: flight.id, flight_number: flight.flight_number, airline: flight.airline },
-      touristCount: tourists.length,
-      roomAssignments
+      const groupUpdateStmt = db.prepare(`
+        UPDATE tour_groups SET hotel_id = ?, flight_id = ?, status = 'allocated'
+        WHERE id = ?
+      `)
+      groupUpdateStmt.run(hotel.id, flight.id, groupId)
+    })
+
+    try {
+      txn()
+      return {
+        success: true,
+        hotel: {
+          id: hotel.id,
+          name: hotel.name,
+          star_rating: hotel.star_rating,
+          rooms_booked: neededRooms,
+          remaining_rooms: hotel.available_rooms - neededRooms,
+        },
+        flight: {
+          id: flight.id,
+          flight_number: flight.flight_number,
+          airline: flight.airline,
+          seats_booked: tourists.length,
+          remaining_seats: flight.available_seats - tourists.length,
+        },
+        touristCount: tourists.length,
+        roomAssignments,
+      }
+    } catch (e: any) {
+      return { success: false, message: e.message || '资源分配事务失败，请重试' }
     }
   })
 
   ipcMain.handle('statistics:overview', () => {
-    const db = getDatabase()
-
     const groupCountStmt = db.prepare('SELECT COUNT(*) as count FROM tour_groups')
     const { count: totalGroups } = groupCountStmt.get() as { count: number }
 
@@ -858,13 +1145,12 @@ function registerIpcHandlers() {
     return {
       totalGroups,
       totalTourists,
-      totalRevenue,
-      pendingSettlements
+      totalRevenue: Number(totalRevenue || 0),
+      pendingSettlements,
     }
   })
 
   ipcMain.handle('statistics:byRoute', () => {
-    const db = getDatabase()
     const stmt = db.prepare(`
       SELECT
         tg.route_name,
@@ -881,7 +1167,6 @@ function registerIpcHandlers() {
   })
 
   ipcMain.handle('statistics:byGuide', () => {
-    const db = getDatabase()
     const stmt = db.prepare(`
       SELECT
         g.name as guide_name,
@@ -933,45 +1218,65 @@ function registerIpcHandlers() {
   })
 
   ipcMain.handle('reminders:checkPaymentOverdue', () => {
-    const db = getDatabase()
     const stmt = db.prepare(`
       SELECT t.*, tg.group_name, tg.departure_date, tg.base_price
       FROM tourists t
       JOIN tour_groups tg ON t.group_id = tg.id
-      WHERE t.payment_status = 'unpaid'
-        AND t.status = 'registered'
+      WHERE t.payment_status != 'paid'
+        AND COALESCE(t.is_locked, 0) = 0
         AND julianday('now') - julianday(t.created_at) > 3
     `)
     const overdueTourists = stmt.all() as any[]
 
-    const insertStmt = db.prepare(`
+    const insertReminderStmt = db.prepare(`
       INSERT INTO reminders (type, title, content, related_id, related_type, is_read, created_at)
       VALUES (?, ?, ?, ?, ?, 0, datetime('now'))
     `)
+    const lockTouristStmt = db.prepare(`
+      UPDATE tourists SET
+        is_locked = 1,
+        lock_reason = '超期未付款催缴锁定名额',
+        locked_at = datetime('now'),
+        updated_at = datetime('now')
+      WHERE id = ? AND COALESCE(is_locked, 0) = 0
+    `)
 
-    overdueTourists.forEach(tourist => {
-      const existingStmt = db.prepare(`
-        SELECT id FROM reminders
-        WHERE related_id = ? AND related_type = 'payment_reminder' AND is_read = 0
-      `)
-      const existing = existingStmt.get(tourist.id)
+    let lockedCount = 0
+    let reminderCount = 0
 
-      if (!existing) {
-        insertStmt.run(
-          'payment',
-          '付款催缴提醒',
-          `游客 ${tourist.name} 报名${tourist.group_name}已超过3天未付款，请及时催缴。应缴金额：¥${tourist.base_price}`,
-          tourist.id,
-          'payment_reminder'
-        )
+    const txn = db.transaction(() => {
+      for (const tourist of overdueTourists) {
+        const lockRes = lockTouristStmt.run(tourist.id)
+        if (lockRes.changes > 0) lockedCount++
+
+        const existingStmt = db.prepare(`
+          SELECT id FROM reminders
+          WHERE related_id = ? AND related_type = 'payment_reminder' AND is_read = 0
+        `)
+        const existing = existingStmt.get(tourist.id)
+
+        if (!existing) {
+          insertReminderStmt.run(
+            'payment',
+            '付款催缴提醒',
+            `游客 ${tourist.name} 报名${tourist.group_name}已超过3天未付款，名额已锁定，收款后自动解锁。应缴金额：¥${tourist.base_price}`,
+            tourist.id,
+            'payment_reminder'
+          )
+          reminderCount++
+        }
       }
     })
 
-    return { overdueCount: overdueTourists.length }
+    try {
+      txn()
+      return { overdueCount: overdueTourists.length, lockedCount, reminderCount }
+    } catch (e) {
+      return { overdueCount: overdueTourists.length, lockedCount: 0, reminderCount: 0, error: String(e) }
+    }
   })
 
   ipcMain.handle('reminders:checkDepartureSoon', () => {
-    const db = getDatabase()
     const stmt = db.prepare(`
       SELECT tg.*, COUNT(t.id) as tourist_count
       FROM tour_groups tg
@@ -987,6 +1292,7 @@ function registerIpcHandlers() {
       VALUES (?, ?, ?, ?, ?, 0, datetime('now'))
     `)
 
+    let count = 0
     departingGroups.forEach(group => {
       const existingStmt = db.prepare(`
         SELECT id FROM reminders
@@ -1002,15 +1308,14 @@ function registerIpcHandlers() {
           group.id,
           'departure_reminder'
         )
+        count++
       }
     })
 
-    return { departingCount: departingGroups.length }
+    return { departingCount: departingGroups.length, generated: count }
   })
 
   ipcMain.handle('itinerary:generate', (_event, groupId) => {
-    const db = getDatabase()
-
     const groupStmt = db.prepare('SELECT * FROM tour_groups WHERE id = ?')
     const group = groupStmt.get(groupId) as any
 
@@ -1019,7 +1324,7 @@ function registerIpcHandlers() {
     }
 
     const touristsStmt = db.prepare(`
-      SELECT * FROM tourists WHERE group_id = ? ORDER BY seat_number ASC
+      SELECT * FROM tourists WHERE group_id = ? ORDER BY COALESCE(seat_number, id) ASC
     `)
     const tourists = touristsStmt.all(groupId)
 
@@ -1034,16 +1339,73 @@ function registerIpcHandlers() {
       FROM guide_schedules gs
       LEFT JOIN guides g ON gs.guide_id = g.id
       WHERE gs.group_id = ? AND gs.status = 'scheduled'
+      ORDER BY gs.created_at DESC
       LIMIT 1
     `)
     const guideSchedule = guideScheduleStmt.get(groupId)
+
+    const pushRecordStmt = db.prepare(`
+      SELECT * FROM itinerary_push_records
+      WHERE group_id = ?
+      ORDER BY pushed_at DESC
+      LIMIT 1
+    `)
+    const pushRecord = pushRecordStmt.get(groupId)
 
     return {
       group,
       tourists,
       hotel,
       flight,
-      guide: guideSchedule
+      guide: guideSchedule,
+      push_status: pushRecord ? {
+        pushed: true,
+        pushed_at: pushRecord.pushed_at,
+        pushed_to: pushRecord.pushed_to,
+        push_status: pushRecord.push_status,
+        remark: pushRecord.remark,
+      } : {
+        pushed: false,
+      }
     }
+  })
+
+  ipcMain.handle('itinerary:pushToLeader', (_event, groupId) => {
+    const groupStmt = db.prepare('SELECT * FROM tour_groups WHERE id = ?')
+    const group = groupStmt.get(groupId) as any
+    if (!group) {
+      return { success: false, message: '团不存在' }
+    }
+
+    const insertPushStmt = db.prepare(`
+      INSERT INTO itinerary_push_records (
+        group_id, group_name, pushed_at, pushed_to, push_status, remark, created_at
+      ) VALUES (?, ?, datetime('now'), '领队终端', 'success', '已成功推送至领队设备', datetime('now'))
+    `)
+    const result = insertPushStmt.run(
+      groupId,
+      group.group_name
+    )
+
+    const pushRecord = {
+      id: result.lastInsertRowid,
+      group_id: groupId,
+      group_name: group.group_name,
+    }
+
+    return {
+      success: true,
+      message: '行程单已成功推送至领队终端',
+      pushRecord,
+    }
+  })
+
+  ipcMain.handle('itinerary:pushList', () => {
+    const stmt = db.prepare(`
+      SELECT * FROM itinerary_push_records
+      ORDER BY pushed_at DESC
+      LIMIT 100
+    `)
+    return stmt.all()
   })
 }

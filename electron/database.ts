@@ -12,6 +12,7 @@ export function initDatabase() {
   db.pragma('foreign_keys = ON')
 
   createTables()
+  migrateTables()
   seedData()
 
   return db
@@ -22,6 +23,17 @@ export function getDatabase() {
     throw new Error('Database not initialized')
   }
   return db
+}
+
+function hasColumn(table: string, column: string): boolean {
+  if (!db) return false
+  try {
+    const stmt = db.prepare(`PRAGMA table_info(${table})`)
+    const columns: any[] = stmt.all()
+    return columns.some(c => c.name === column)
+  } catch {
+    return false
+  }
 }
 
 function createTables() {
@@ -119,6 +131,9 @@ function createTables() {
       end_date TEXT,
       estimated_hours INTEGER DEFAULT 0,
       status TEXT DEFAULT 'scheduled',
+      original_guide_id INTEGER,
+      swap_reason TEXT,
+      swapped_at TEXT,
       created_at TEXT,
       updated_at TEXT,
       FOREIGN KEY (group_id) REFERENCES tour_groups(id),
@@ -206,7 +221,42 @@ function createTables() {
       FOREIGN KEY (guide_id) REFERENCES guides(id),
       FOREIGN KEY (tourist_id) REFERENCES tourists(id)
     );
+
+    CREATE TABLE IF NOT EXISTS itinerary_push_records (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      group_id INTEGER NOT NULL,
+      group_name TEXT,
+      pushed_at TEXT,
+      pushed_to TEXT DEFAULT '领队终端',
+      push_status TEXT DEFAULT 'success',
+      remark TEXT,
+      created_at TEXT,
+      FOREIGN KEY (group_id) REFERENCES tour_groups(id)
+    );
   `)
+}
+
+function migrateTables() {
+  if (!db) return
+
+  if (!hasColumn('tourists', 'is_locked')) {
+    db.exec(`ALTER TABLE tourists ADD COLUMN is_locked INTEGER DEFAULT 0`)
+  }
+  if (!hasColumn('tourists', 'locked_at')) {
+    db.exec(`ALTER TABLE tourists ADD COLUMN locked_at TEXT`)
+  }
+  if (!hasColumn('tourists', 'lock_reason')) {
+    db.exec(`ALTER TABLE tourists ADD COLUMN lock_reason TEXT`)
+  }
+  if (!hasColumn('guide_schedules', 'original_guide_id')) {
+    db.exec(`ALTER TABLE guide_schedules ADD COLUMN original_guide_id INTEGER`)
+  }
+  if (!hasColumn('guide_schedules', 'swap_reason')) {
+    db.exec(`ALTER TABLE guide_schedules ADD COLUMN swap_reason TEXT`)
+  }
+  if (!hasColumn('guide_schedules', 'swapped_at')) {
+    db.exec(`ALTER TABLE guide_schedules ADD COLUMN swapped_at TEXT`)
+  }
 }
 
 function seedData() {
@@ -280,8 +330,8 @@ function seedData() {
     const result4 = insertGroupStmt.run('杭州-上海3日休闲游', '杭州-上海', '2025-01-25', '2025-01-27', 20, 1599, '中文,英语', 3, 'draft')
 
     const insertTouristStmt = db.prepare(`
-      INSERT INTO tourists (group_id, name, id_card, phone, age, gender, special_needs, dietary_requirements, status, payment_status, amount_paid, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'registered', ?, ?, datetime('now'))
+      INSERT INTO tourists (group_id, name, id_card, phone, age, gender, special_needs, dietary_requirements, status, payment_status, amount_paid, is_locked, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'registered', ?, ?, 0, datetime('now'))
     `)
 
     const sampleTourists = [

@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { Card, List, Tag, Button, Badge, Space, message, Tabs } from 'antd'
+import { Card, List, Tag, Button, Badge, Space, message, Tabs, Modal, Divider } from 'antd'
 import {
   BellOutlined,
   DollarOutlined,
@@ -56,11 +56,35 @@ const ReminderPage = () => {
   const handleCheckPayment = async () => {
     try {
       const result = await (window as any).electronAPI.reminders.checkPaymentOverdue()
-      message.info(`检测到 ${result.overdueCount} 条超期未付款记录`)
+      if (result && (result.overdueCount > 0 || result.lockedCount > 0)) {
+        Modal.info({
+          title: '超期未付款检查结果',
+          content: (
+            <div style={{ fontSize: 14 }}>
+              <div style={{ marginBottom: 8 }}>
+                检测到超期未付款游客：<b style={{ color: '#f5222d' }}>{result.overdueCount || 0}</b> 名
+              </div>
+              <div style={{ marginBottom: 8 }}>
+                本次新增催缴提醒：<b>{result.reminderCount || 0}</b> 条
+              </div>
+              <div style={{ marginBottom: 8 }}>
+                自动锁定名额：<b style={{ color: '#f5222d' }}>{result.lockedCount || 0}</b> 个
+              </div>
+              <Divider style={{ margin: '8px 0' }} />
+              <div style={{ color: '#888', fontSize: 12 }}>
+                名额已进入锁定状态，游客完成付款后将自动解锁。
+                可在各旅行团详情页的游客列表中查看并手动解锁。
+              </div>
+            </div>
+          ),
+        })
+      } else {
+        message.success('检查完成：无超期未付款记录')
+      }
       loadUnreadData()
       loadAllData()
-    } catch (e) {
-      message.error('检测失败')
+    } catch (e: any) {
+      message.error(e.message || '检测失败')
     }
   }
 

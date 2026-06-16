@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { Table, Button, Tag, Space, Modal, Form, Select, DatePicker, message, Card } from 'antd'
+import { Table, Button, Tag, Space, Modal, Form, Select, DatePicker, message, Card, Divider } from 'antd'
 import { PlusOutlined, ReloadOutlined, CalendarOutlined } from '@ant-design/icons'
 import { GuideSchedule, TourGroup, Guide, PageResult } from '../types'
 import dayjs from 'dayjs'
@@ -67,8 +67,38 @@ const GuideSchedulePage = () => {
       title: '自动排班',
       content: '系统将根据导游语言资质、历史评价和工时上限自动生成排班。确认继续？',
       onOk: async () => {
-        message.info('自动排班功能需要更多业务逻辑，当前演示版本已生成示例排班')
-        loadData()
+        try {
+          const result = await (window as any).electronAPI.guideSchedules.autoSchedule()
+          if (result && result.success) {
+            let msg = result.message
+            if (result.skipped && result.skipped.length > 0) {
+              Modal.info({
+                title: `排班结果：成功${result.created}条，跳过${result.skipped.length}条`,
+                content: (
+                  <div>
+                    <p style={{ color: '#52c41a' }}>{msg}</p>
+                    <Divider>跳过的团</Divider>
+                    {result.skipped.map((s: any, idx: number) => (
+                      <div key={idx} style={{ marginBottom: 8 }}>
+                        <b>{s.group_name}</b>：<span style={{ color: '#f5222d' }}>{s.reason}</span>
+                      </div>
+                    ))}
+                  </div>
+                ),
+              })
+            } else {
+              message.success(msg)
+            }
+          } else {
+            message.error(result?.message || '排班失败')
+          }
+          setData(prev => ({ ...prev, page: 1 }))
+          loadData()
+          loadGuides()
+        } catch (e: any) {
+          console.error(e)
+          message.error(e.message || '排班失败')
+        }
       },
     })
   }
@@ -110,7 +140,15 @@ const GuideSchedulePage = () => {
   const columns = [
     { title: 'ID', dataIndex: 'id', key: 'id', width: 60 },
     { title: '旅行团', dataIndex: 'group_name', key: 'group_name' },
-    { title: '导游', dataIndex: 'guide_name', key: 'guide_name', width: 100 },
+    { title: '当前导游', dataIndex: 'guide_name', key: 'guide_name', width: 100 },
+    { title: '原导游', dataIndex: 'original_guide_name', key: 'original_guide_name', width: 100,
+      render: (val: string, record: any) => val
+        ? <Tag color="purple">调班自 {val}</Tag>
+        : <span style={{ color: '#999' }}>-</span> },
+    { title: '调班原因', dataIndex: 'swap_reason', key: 'swap_reason', width: 140,
+      render: (val: string) => val
+        ? <span style={{ color: '#722ed1', fontSize: 12 }}>{val}</span>
+        : <span style={{ color: '#999' }}>-</span> },
     { title: '开始日期', dataIndex: 'start_date', key: 'start_date', width: 110 },
     { title: '结束日期', dataIndex: 'end_date', key: 'end_date', width: 110 },
     { title: '预计工时', dataIndex: 'estimated_hours', key: 'estimated_hours', width: 100,

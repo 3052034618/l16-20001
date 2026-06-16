@@ -40,12 +40,26 @@ const GuideManagement = () => {
   const handleAdd = () => {
     setEditingId(null)
     form.resetFields()
+    form.setFieldsValue({
+      languages: [],
+      status: 'active',
+      rating: 4.5,
+      years_of_experience: 0,
+      max_monthly_hours: 168,
+      current_month_hours: 0,
+    })
     setModalVisible(true)
   }
 
   const handleEdit = (record: Guide) => {
     setEditingId(record.id)
-    form.setFieldsValue(record)
+    const languagesArr = record.languages
+      ? record.languages.split(/[,，]/).filter(Boolean)
+      : []
+    form.setFieldsValue({
+      ...record,
+      languages: languagesArr,
+    })
     setModalVisible(true)
   }
 
@@ -61,8 +75,9 @@ const GuideManagement = () => {
       }
       setModalVisible(false)
       loadData()
-    } catch (e) {
+    } catch (e: any) {
       console.error(e)
+      message.error(e.message || '保存失败')
     }
   }
 
@@ -71,9 +86,12 @@ const GuideManagement = () => {
     { title: '姓名', dataIndex: 'name', key: 'name', width: 100 },
     { title: '电话', dataIndex: 'phone', key: 'phone', width: 120 },
     { title: '语言', dataIndex: 'languages', key: 'languages',
-      render: (val: string) => val?.split(',').map((lang, i) => (
-        <Tag key={i} color="blue">{lang}</Tag>
-      )) },
+      render: (val: string) => {
+        if (!val) return '-'
+        return val.split(/[,，]/).filter(Boolean).map((lang, i) => (
+          <Tag key={i} color="blue" style={{ marginBottom: 2 }}>{lang}</Tag>
+        ))
+      } },
     { title: '从业年限', dataIndex: 'years_of_experience', key: 'years_of_experience', width: 100,
       render: (val: number) => `${val}年` },
     { title: '评分', dataIndex: 'rating', key: 'rating', width: 120,
