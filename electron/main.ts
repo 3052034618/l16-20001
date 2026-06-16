@@ -265,7 +265,10 @@ function registerIpcHandlers() {
       WHERE id = ?
     `)
     const result = stmt.run(id)
-    return { changes: result.changes }
+    if (result.changes > 0) {
+      return { success: true, message: '名额已解锁', changes: result.changes }
+    }
+    return { success: false, message: '解锁失败', changes: 0 }
   })
 
   ipcMain.handle('hotels:list', (_event, params) => {
@@ -734,29 +737,29 @@ function registerIpcHandlers() {
     const getSwapStmt = db.prepare('SELECT * FROM shift_swaps WHERE id = ?')
     const swap: any = getSwapStmt.get(id)
     if (!swap) {
-      return { changes: 0, error: '调班申请不存在' }
+      return { success: false, message: '调班申请不存在', changes: 0 }
     }
     if (swap.status !== 'pending') {
-      return { changes: 0, error: '该申请已被处理' }
+      return { success: false, message: '该申请已被处理', changes: 0 }
     }
     const getScheduleStmt = db.prepare('SELECT * FROM guide_schedules WHERE id = ?')
     const schedule: any = getScheduleStmt.get(swap.schedule_id)
     if (!schedule) {
-      return { changes: 0, error: '排班记录不存在' }
+      return { success: false, message: '排班记录不存在', changes: 0 }
     }
     const originalGuideId = schedule.guide_id
     if (Number(originalGuideId) !== Number(swap.requester_guide_id)) {
-      return { changes: 0, error: '申请人与当前排班导游不符，无法审批' }
+      return { success: false, message: '申请人与当前排班导游不符，无法审批', changes: 0 }
     }
     const targetGuideStmt = db.prepare('SELECT * FROM guides WHERE id = ?')
     const targetGuide: any = targetGuideStmt.get(swap.target_guide_id)
     if (!targetGuide) {
-      return { changes: 0, error: '目标导游不存在' }
+      return { success: false, message: '目标导游不存在', changes: 0 }
     }
     const estHours = Number(schedule.estimated_hours || 0)
     const newHours = (targetGuide.current_month_hours || 0) + estHours
     if (newHours > (targetGuide.max_monthly_hours || 160)) {
-      return { changes: 0, error: `目标导游本月工时将超过上限${targetGuide.max_monthly_hours}小时，无法调班` }
+      return { success: false, message: `目标导游本月工时将超过上限${targetGuide.max_monthly_hours}小时，无法调班`, changes: 0 }
     }
 
     const txn = db.transaction(() => {
@@ -796,19 +799,30 @@ function registerIpcHandlers() {
 
     try {
       txn()
-      return { changes: 1 }
+      return { success: true, message: '审批通过，排班已变更到目标导游名下', changes: 1 }
     } catch (e: any) {
-      return { changes: 0, error: e.message || String(e) }
+      return { success: false, message: e.message || String(e), changes: 0 }
     }
   })
 
   ipcMain.handle('shift-swaps:reject', (_event, id, rejectReason) => {
+    const getSwapStmt = db.prepare('SELECT * FROM shift_swaps WHERE id = ?')
+    const swap: any = getSwapStmt.get(id)
+    if (!swap) {
+      return { success: false, message: '调班申请不存在', changes: 0 }
+    }
+    if (swap.status !== 'pending') {
+      return { success: false, message: '该申请已被处理', changes: 0 }
+    }
     const stmt = db.prepare(`
       UPDATE shift_swaps SET status = 'rejected', reject_reason = ?, rejected_at = datetime('now')
       WHERE id = ? AND status = 'pending'
     `)
     const result = stmt.run(rejectReason, id)
-    return { changes: result.changes }
+    if (result.changes > 0) {
+      return { success: true, message: '已驳回，原排班保持不变', changes: result.changes }
+    }
+    return { success: false, message: '驳回失败', changes: 0 }
   })
 
   ipcMain.handle('finance:settlements', (_event, params) => {
@@ -876,7 +890,16 @@ function registerIpcHandlers() {
       netAmount,
       tourists.length
     )
-    return { id: result.lastInsertRowid, totalFee, totalPaid, totalSelfPaid, totalRefund, netAmount }
+    return {
+      success: true,
+      settlementId: result.lastInsertRowid,
+      totalFee,
+      totalPaid,
+      totalSelfPaid: totalSelfPaid || 0,
+      totalRefund: totalRefund || 0,
+      netAmount,
+      touristCount: tourists.length,
+    }
   })
 
   ipcMain.handle('finance:approveSettlement', (_event, id) => {
@@ -1350,7 +1373,23 @@ function registerIpcHandlers() {
       ORDER BY pushed_at DESC
       LIMIT 1
     `)
-    const pushRecord = pushRecordStmt.get(groupId)
+    const pushRecord = pushRecordStmt.get(groupId) as any
+
+    const pushStatus = pushRecord
+      ? {
+          push_status: 'pushed',
+          pushed_at: pushRecord.pushed_at,
+          pushed_to: pushRecord.pushed_to,
+          remark: pushRecord.remark,
+          group_id: pushRecord.group_id,
+          group_name: pushRecord.group_name,
+        }
+      : {
+          push_status: 'not_pushed',
+          pushed_at: null,
+          pushed_to: null,
+          remark: null,
+        }
 
     return {
       group,
@@ -1358,15 +1397,7 @@ function registerIpcHandlers() {
       hotel,
       flight,
       guide: guideSchedule,
-      push_status: pushRecord ? {
-        pushed: true,
-        pushed_at: pushRecord.pushed_at,
-        pushed_to: pushRecord.pushed_to,
-        push_status: pushRecord.push_status,
-        remark: pushRecord.remark,
-      } : {
-        pushed: false,
-      }
+      push_status: pushStatus,
     }
   })
 
@@ -1380,7 +1411,7 @@ function registerIpcHandlers() {
     const insertPushStmt = db.prepare(`
       INSERT INTO itinerary_push_records (
         group_id, group_name, pushed_at, pushed_to, push_status, remark, created_at
-      ) VALUES (?, ?, datetime('now'), '领队终端', 'success', '已成功推送至领队设备', datetime('now'))
+      ) VALUES (?, ?, datetime('now'), '领队终端', 'pushed', '已成功推送至领队设备', datetime('now'))
     `)
     const result = insertPushStmt.run(
       groupId,

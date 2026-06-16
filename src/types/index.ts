@@ -202,6 +202,14 @@ export interface ItineraryData {
     start_date: string
     end_date: string
   }
+  push_status: {
+    push_status: 'pushed' | 'not_pushed'
+    pushed_at: string | null
+    pushed_to: string | null
+    remark: string | null
+    group_id?: number
+    group_name?: string
+  }
 }
 
 export interface PageResult<T> {
