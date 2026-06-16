@@ -177,15 +177,31 @@ const TourGroupDetail = () => {
   const handleTouristSubmit = async () => {
     try {
       const values = await touristForm.validateFields()
-      const submitData = {
-        ...values,
-        group_id: Number(id),
-      }
 
       if (editingTouristId) {
-        await (window as any).electronAPI.tourists.update(editingTouristId, submitData)
-        message.success('更新成功')
+        const updateData: any = {}
+        if (values.name !== undefined) updateData.name = values.name
+        if (values.id_card !== undefined) updateData.id_card = values.id_card
+        if (values.phone !== undefined) updateData.phone = values.phone
+        if (values.age !== undefined) updateData.age = values.age
+        if (values.gender !== undefined) updateData.gender = values.gender
+        if (values.special_needs !== undefined) updateData.special_needs = values.special_needs
+        if (values.dietary_requirements !== undefined) updateData.dietary_requirements = values.dietary_requirements
+        if (values.status !== undefined) updateData.status = values.status
+        if (values.payment_status !== undefined) updateData.payment_status = values.payment_status
+        if (values.amount_paid !== undefined) updateData.amount_paid = values.amount_paid
+
+        const result = await (window as any).electronAPI.tourists.update(editingTouristId, updateData)
+        if (result && result.success) {
+          message.success('更新成功')
+        } else {
+          message.error(result?.message || '更新失败')
+        }
       } else {
+        const submitData = {
+          ...values,
+          group_id: Number(id),
+        }
         await (window as any).electronAPI.tourists.create(submitData)
         message.success('添加成功')
       }
@@ -302,45 +318,59 @@ const TourGroupDetail = () => {
       content: '确认生成本团的财务结算单？系统会按数据库实际汇总的自费、退款金额进行精确结算。',
       onOk: async () => {
         try {
-          const result = await (window as any).electronAPI.finance.createSettlement(Number(id))
-          if (result && result.success) {
-            const calcSelfPaid = selfPaidItems.reduce((s, i) => s + (i.amount || 0), 0)
-            const calcRefund = refunds.reduce((s, i) => s + (i.amount || 0), 0)
-            const sameSelfPaid = Math.abs(calcSelfPaid - (result.totalSelfPaid || 0)) < 0.001
-            const sameRefund = Math.abs(calcRefund - (result.totalRefund || 0)) < 0.001
+          const [selfPaidData, refundData, settlementResult] = await Promise.all([
+            (window as any).electronAPI.selfPaid.list(Number(id)),
+            (window as any).electronAPI.refunds.list(Number(id)),
+            (window as any).electronAPI.finance.createSettlement(Number(id)),
+          ])
+          setSelfPaidItems(selfPaidData || [])
+          setRefunds(refundData || [])
+          setLoadedTabs(prev => new Set(prev).add('selfpaid').add('refunds'))
+
+          if (settlementResult && settlementResult.success) {
+            const calcSelfPaid = (selfPaidData || []).reduce((s: number, i: any) => s + (i.amount || 0), 0)
+            const calcRefund = (refundData || []).reduce((s: number, i: any) => s + (i.amount || 0), 0)
+            const sameSelfPaid = Math.abs(calcSelfPaid - (settlementResult.totalSelfPaid || 0)) < 0.001
+            const sameRefund = Math.abs(calcRefund - (settlementResult.totalRefund || 0)) < 0.001
             Modal.info({
-              title: `结算单#${result.settlementId} 已生成`,
+              title: `结算单#${settlementResult.settlementId} 已生成`,
+              width: 520,
               content: (
                 <div>
-                  <div style={{ marginBottom: 8, color: sameSelfPaid && sameRefund ? '#52c41a' : '#fa8c16' }}>
-                    {sameSelfPaid && sameRefund ? '汇总金额与列表明细完全一致 ✓' : '金额存在差异（以数据库聚合为准）'}
+                  <div style={{ marginBottom: 10, color: sameSelfPaid && sameRefund ? '#52c41a' : '#fa8c16', fontWeight: 500 }}>
+                    {sameSelfPaid && sameRefund ? '✓ 汇总金额与列表明细完全一致' : '⚠ 金额存在差异（以数据库聚合为准）'}
                   </div>
                   <Descriptions column={1} size="small" bordered>
-                    <Descriptions.Item label="团费总额 (团人数×基础价)">
-                      ¥{(result.totalFee || 0).toFixed(2)}
+                    <Descriptions.Item label="游客人数">
+                      {settlementResult.touristCount || tourists.total} 人
+                    </Descriptions.Item>
+                    <Descriptions.Item label="团费总额（人×基础价）">
+                      <b>¥{(settlementResult.totalFee || 0).toFixed(2)}</b>
                     </Descriptions.Item>
                     <Descriptions.Item label="已收团费合计">
-                      ¥{(result.totalPaid || 0).toFixed(2)}
+                      ¥{(settlementResult.totalPaid || 0).toFixed(2)}
                     </Descriptions.Item>
-                    <Descriptions.Item label={`自费项目汇总 （${selfPaidItems.length}项）`}>
+                    <Descriptions.Item label={`自费项目合计（${selfPaidData?.length || 0} 项）`}>
                       <div style={{ color: sameSelfPaid ? '#52c41a' : '#fa8c16' }}>
-                        列表¥{calcSelfPaid.toFixed(2)} / 结算¥{(result.totalSelfPaid || 0).toFixed(2)}
+                        列表¥{calcSelfPaid.toFixed(2)} / 结算¥{(settlementResult.totalSelfPaid || 0).toFixed(2)}
                       </div>
                     </Descriptions.Item>
-                    <Descriptions.Item label={`退款汇总（${refunds.length}项）`}>
+                    <Descriptions.Item label={`退款合计（${refundData?.length || 0} 项）`}>
                       <div style={{ color: sameRefund ? '#52c41a' : '#fa8c16' }}>
-                        列表¥{calcRefund.toFixed(2)} / 结算¥{(result.totalRefund || 0).toFixed(2)}
+                        列表¥{calcRefund.toFixed(2)} / 结算¥{(settlementResult.totalRefund || 0).toFixed(2)}
                       </div>
                     </Descriptions.Item>
-                    <Descriptions.Item label="净额 (团费+自费-退款)" style={{ fontWeight: 600 }}>
-                      ¥{(result.netAmount || 0).toFixed(2)}
+                    <Descriptions.Item label="净额（团费 + 自费 − 退款）" style={{ fontWeight: 600 }}>
+                      <span style={{ fontSize: 16, color: '#1890ff' }}>
+                        ¥{(settlementResult.netAmount || 0).toFixed(2)}
+                      </span>
                     </Descriptions.Item>
                   </Descriptions>
                 </div>
               ),
             })
           } else {
-            message.error(result?.message || '生成失败')
+            message.error(settlementResult?.message || '生成失败')
           }
         } catch (e: any) {
           message.error(e.message || '生成失败')

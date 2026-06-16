@@ -194,55 +194,71 @@ function registerIpcHandlers() {
   })
 
   ipcMain.handle('tourists:update', (_event, id, data) => {
-    const groupStmt = db.prepare('SELECT base_price FROM tour_groups WHERE id = ?')
-    const touristStmt = db.prepare('SELECT group_id FROM tourists WHERE id = ?')
-    const tourist: any = touristStmt.get(id)
-    const group: any = tourist ? groupStmt.get(tourist.group_id) : null
-    const basePrice = group?.base_price || 0
-
-    let isLocked = data.is_locked
-    let lockReason = data.lock_reason
-    let lockedAt = data.locked_at
-
-    if (data.payment_status === 'paid' || (Number(data.amount_paid) >= basePrice && basePrice > 0)) {
-      isLocked = 0
-      lockReason = null
-      lockedAt = null
+    const getTouristStmt = db.prepare('SELECT * FROM tourists WHERE id = ?')
+    const existing: any = getTouristStmt.get(id)
+    if (!existing) {
+      return { success: false, message: '游客不存在', changes: 0 }
     }
 
-    const stmt = db.prepare(`
-      UPDATE tourists SET
-        group_id = ?, name = ?, id_card = ?, phone = ?,
-        age = ?, gender = ?, special_needs = ?,
-        dietary_requirements = ?, status = ?,
-        payment_status = ?, amount_paid = ?,
-        seat_number = ?, hotel_room = ?,
-        is_locked = COALESCE(?, is_locked),
-        lock_reason = ?,
-        locked_at = ?,
-        updated_at = datetime('now')
-      WHERE id = ?
-    `)
-    const result = stmt.run(
-      data.group_id,
-      data.name,
-      data.id_card,
-      data.phone,
-      data.age,
-      data.gender,
-      data.special_needs,
-      data.dietary_requirements,
-      data.status,
-      data.payment_status,
-      data.amount_paid,
-      data.seat_number,
-      data.hotel_room,
-      isLocked,
-      lockReason,
-      lockedAt,
-      id
-    )
-    return { changes: result.changes }
+    const groupStmt = db.prepare('SELECT base_price FROM tour_groups WHERE id = ?')
+    const group: any = groupStmt.get(existing.group_id)
+    const basePrice = group?.base_price || 0
+
+    const fields: string[] = []
+    const values: any[] = []
+
+    if (data.group_id !== undefined) { fields.push('group_id = ?'); values.push(data.group_id) }
+    if (data.name !== undefined) { fields.push('name = ?'); values.push(data.name) }
+    if (data.id_card !== undefined) { fields.push('id_card = ?'); values.push(data.id_card) }
+    if (data.phone !== undefined) { fields.push('phone = ?'); values.push(data.phone) }
+    if (data.age !== undefined) { fields.push('age = ?'); values.push(data.age) }
+    if (data.gender !== undefined) { fields.push('gender = ?'); values.push(data.gender) }
+    if (data.special_needs !== undefined) { fields.push('special_needs = ?'); values.push(data.special_needs) }
+    if (data.dietary_requirements !== undefined) { fields.push('dietary_requirements = ?'); values.push(data.dietary_requirements) }
+    if (data.status !== undefined) { fields.push('status = ?'); values.push(data.status) }
+    if (data.payment_status !== undefined) { fields.push('payment_status = ?'); values.push(data.payment_status) }
+    if (data.amount_paid !== undefined) { fields.push('amount_paid = ?'); values.push(data.amount_paid) }
+    if (data.seat_number !== undefined) { fields.push('seat_number = ?'); values.push(data.seat_number) }
+    if (data.hotel_room !== undefined) { fields.push('hotel_room = ?'); values.push(data.hotel_room) }
+    if (data.hotel_id !== undefined) { fields.push('hotel_id = ?'); values.push(data.hotel_id) }
+    if (data.flight_id !== undefined) { fields.push('flight_id = ?'); values.push(data.flight_id) }
+
+    const paymentStatus = data.payment_status !== undefined ? data.payment_status : existing.payment_status
+    const amountPaid = data.amount_paid !== undefined ? Number(data.amount_paid) : Number(existing.amount_paid || 0)
+
+    if (paymentStatus === 'paid' || (amountPaid >= basePrice && basePrice > 0)) {
+      fields.push('is_locked = ?')
+      values.push(0)
+      fields.push('lock_reason = ?')
+      values.push(null)
+      fields.push('locked_at = ?')
+      values.push(null)
+    } else if (data.is_locked !== undefined) {
+      fields.push('is_locked = ?')
+      values.push(data.is_locked)
+      if (data.lock_reason !== undefined) {
+        fields.push('lock_reason = ?')
+        values.push(data.lock_reason)
+      }
+      if (data.locked_at !== undefined) {
+        fields.push('locked_at = ?')
+        values.push(data.locked_at)
+      }
+    }
+
+    if (fields.length === 0) {
+      return { success: true, message: '无字段需要更新', changes: 0 }
+    }
+
+    fields.push('updated_at = datetime(\'now\')')
+    values.push(id)
+
+    const sql = `UPDATE tourists SET ${fields.join(', ')} WHERE id = ?`
+    const stmt = db.prepare(sql)
+    const result = stmt.run(...values)
+
+    const updatedTourist = getTouristStmt.get(id)
+    return { success: true, changes: result.changes, tourist: updatedTourist }
   })
 
   ipcMain.handle('tourists:delete', (_event, id) => {
@@ -1377,7 +1393,7 @@ function registerIpcHandlers() {
 
     const pushStatus = pushRecord
       ? {
-          push_status: 'pushed',
+          push_status: (pushRecord.push_status === 'pushed' || pushRecord.push_status === 'success') ? 'pushed' : pushRecord.push_status,
           pushed_at: pushRecord.pushed_at,
           pushed_to: pushRecord.pushed_to,
           remark: pushRecord.remark,
@@ -1437,6 +1453,10 @@ function registerIpcHandlers() {
       ORDER BY pushed_at DESC
       LIMIT 100
     `)
-    return stmt.all()
+    const list = stmt.all() as any[]
+    return list.map(r => ({
+      ...r,
+      push_status: (r.push_status === 'pushed' || r.push_status === 'success') ? 'pushed' : r.push_status,
+    }))
   })
 }
